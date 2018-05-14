@@ -5,23 +5,27 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.spark.SparkConf;
+import org.apache.spark.SparkContext;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Encoders;
-import org.apache.spark.sql.SparkSession;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 
 import report.entity.CustomerInfo;
+import report.entity.CustomerInfoIterator;
 import report.entity.SalesInfo;
+import report.entity.SalesInfoIterator;
 import scala.Serializable;
 import scala.Tuple2;
 
-public class SalesReport implements Serializable{
+public class SalesReport implements Serializable {
 
-	private static String[] HEADERS = {"State","Year","Month","Day","Hour","Sales"};
+	private static String[] HEADERS = {"State", "Year", "Month", "Day", "Hour", "Sales"};
+	private static String REPORT_NAME = "SalesReport";
+
+	private static final long serialVersionUID = -268544421231396366L;
 
 	private String inputCustomerDataFilePath;
 	private String inputSalesDataFilePath;
@@ -36,11 +40,11 @@ public class SalesReport implements Serializable{
 	}
 
 	private void process() {
-		SparkSession sparkSession = getSparkSession();
-		Dataset<CustomerInfo> customerInfoDataset = getCustomerInfoDS(sparkSession);
-		Dataset<SalesInfo> salesInfoDataset = getSalesInfoDS(sparkSession);
+		JavaSparkContext sparkContext = JavaSparkContext.fromSparkContext(getSparkSession());
+		JavaRDD<CustomerInfo> customerInfoDataset = getCustomerInfoDS(sparkContext);
+		JavaRDD<SalesInfo> salesInfoDataset = getSalesInfoDS(sparkContext);
 
-		JavaPairRDD<Integer, String> result = customerInfoDataset.toJavaRDD().mapToPair(customerInfo -> new Tuple2<>(customerInfo.getCustomerId(), customerInfo.getState()));
+		JavaPairRDD<Integer, String> result = customerInfoDataset.mapToPair(customerInfo -> new Tuple2<>(customerInfo.getCustomerId(), customerInfo.getState()));
 		Map<Integer, String> customerStateMap = result.collectAsMap();
 		// TODO Ask JD if collectAsMap is right approach as per their needs
 		/* 3. We encourage you to consider all possible cases of datasets like
@@ -48,32 +52,35 @@ public class SalesReport implements Serializable{
 			and come with appropriate solutions.
 		*/
 
-
-		JavaPairRDD<String, Long> pairs = salesInfoDataset.toJavaRDD().flatMapToPair(salesInfo -> getListOfTuples(salesInfo, customerStateMap).listIterator()).reduceByKey((x, y) -> x + y);
+		JavaPairRDD<String, Long> salesReportEntries = salesInfoDataset.flatMapToPair(salesInfo -> getListOfTuples(salesInfo, customerStateMap).listIterator()).reduceByKey((x, y) -> x + y).sortByKey();
 		// TODO Ask JD why union is not working here
-		//getHeader(sparkSession).union(pairs).map(stringLongTuple2 -> stringLongTuple2._1() + stringLongTuple2._2()).saveAsTextFile(outputSalesReportPath);
-		pairs.map(stringLongTuple2 -> stringLongTuple2._1() + stringLongTuple2._2()).saveAsTextFile(outputSalesReportPath);
+		//getHeader(sparkContext).union(pairs).map(stringLongTuple2 -> stringLongTuple2._1() + stringLongTuple2._2()).saveAsTextFile(outputSalesReportPath);
+		salesReportEntries.map(stringLongTuple2 -> stringLongTuple2._1() + stringLongTuple2._2()).saveAsTextFile(outputSalesReportPath);
 	}
 
-	private Dataset<CustomerInfo> getCustomerInfoDS(SparkSession sparkSession) {
-		return sparkSession.read().option("delimiter", delimiter).option("inferSchema", "true").csv(inputCustomerDataFilePath).toDF(CustomerInfo.COLUMNS).as(Encoders.bean(CustomerInfo.class));
+	private JavaRDD<CustomerInfo> getCustomerInfoDS(JavaSparkContext sparkContext) {
+		CustomerInfoIterator customerInfoIterator = new CustomerInfoIterator();
+		JavaRDD<String> javaRDD = sparkContext.textFile(inputCustomerDataFilePath);
+		return javaRDD.flatMap(s -> customerInfoIterator.addCustomerInfo(s));
 	}
 
-	private Dataset<SalesInfo> getSalesInfoDS(SparkSession sparkSession) {
-		return sparkSession.read().option("delimiter", delimiter).option("inferSchema", "true").csv(inputSalesDataFilePath).toDF(SalesInfo.COLUMNS).as(Encoders.bean(SalesInfo.class));
+	private JavaRDD<SalesInfo> getSalesInfoDS(JavaSparkContext sparkContext) {
+		SalesInfoIterator salesInfoIterator = new SalesInfoIterator();
+		JavaRDD<String> javaRDD = sparkContext.textFile(inputSalesDataFilePath);
+		return javaRDD.flatMap(s -> salesInfoIterator.addSalesInfo(s));
 	}
 
-	private SparkSession getSparkSession() {
-		return SparkSession.builder().
-				master("local")
-				.appName("SalesReport")
-				.config("spark.driver.host", sparkDriverHost)
-				.getOrCreate();
+	private SparkContext getSparkSession() {
+		SparkConf sparkConf = new SparkConf();
+		sparkConf.setAppName(REPORT_NAME);
+		sparkConf.setMaster("local");
+		sparkConf.set("spark.driver.host", sparkDriverHost);
+		return new SparkContext(sparkConf);
 	}
 
 	private List<Tuple2<String, Long>> getListOfTuples(SalesInfo salesInfo, Map<Integer, String> customerStateMap) {
 		List<Tuple2<String, Long>> tuple2s = new ArrayList<>();
-		for (int level = 0; level <= 4; level++) {
+		for (int level = 4; level >= 0 ; level--) {
 			tuple2s.add(new Tuple2<>(getFilledKey(salesInfo, level, customerStateMap), salesInfo.getSalesPrice()));
 		}
 		return tuple2s;
@@ -87,10 +94,10 @@ public class SalesReport implements Serializable{
 		delimiter = args[4];
 	}
 
-	private JavaPairRDD<String,Long> getHeader(SparkSession sparkSession) {
+	private JavaPairRDD<String, Long> getHeader(JavaSparkContext sparkContext) {
 		String filledHeader = String.format(getKeyTemplate(Arrays.asList(HEADERS)), HEADERS);
 		List<Tuple2<String, Long>> headerTuple = Arrays.asList(new Tuple2<>(filledHeader, 0l));
-		JavaRDD rdd = new JavaSparkContext(sparkSession.sparkContext()).parallelize(headerTuple, 1);
+		JavaRDD rdd = sparkContext.parallelize(headerTuple, 1);
 		return JavaPairRDD.fromJavaRDD(rdd);
 	}
 
@@ -100,8 +107,8 @@ public class SalesReport implements Serializable{
 		return keyTemplate.toString();
 	}
 
-	private  String getFilledKey(SalesInfo salesInfo, int level, Map<Integer, String> customerStateMap) {
-		DateTime dateTime = new DateTime(salesInfo.getTimestamp() * 1000, DateTimeZone.UTC);
+	private String getFilledKey(SalesInfo salesInfo, int level, Map<Integer, String> customerStateMap) {
+		DateTime dateTime = new DateTime(salesInfo.getTimestamp(), DateTimeZone.UTC);
 		List<Object> args = new ArrayList<>();
 		args.add(customerStateMap.get(salesInfo.getCustomerId()));
 		args.add(level > 0 ? String.valueOf(dateTime.getYear()) : "");
