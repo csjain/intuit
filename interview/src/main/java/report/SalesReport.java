@@ -10,6 +10,7 @@ import org.apache.spark.SparkContext;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.api.java.function.FlatMapFunction;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 
@@ -32,6 +33,7 @@ public class SalesReport implements Serializable {
 	private String outputSalesReportPath;
 	private String sparkDriverHost;
 	private String delimiter;
+	private int minPartitions;
 
 	public static void main(String[] args) {
 		SalesReport report = new SalesReport();
@@ -40,47 +42,43 @@ public class SalesReport implements Serializable {
 	}
 
 	private void process() {
-		JavaSparkContext sparkContext = JavaSparkContext.fromSparkContext(getSparkSession());
-		JavaRDD<CustomerInfo> customerInfoDataset = getCustomerInfoDS(sparkContext);
-		JavaRDD<SalesInfo> salesInfoDataset = getSalesInfoDS(sparkContext);
+		JavaSparkContext sc = JavaSparkContext.fromSparkContext(getSparkContext());
+
+		JavaRDD<SalesInfo> salesInfoDataset = getSalesInfoDS(sc);
+		JavaRDD<CustomerInfo> customerInfoDataset = getCustomerInfoDS(sc);
+
 
 		JavaPairRDD<Integer, String> result = customerInfoDataset.mapToPair(customerInfo -> new Tuple2<>(customerInfo.getCustomerId(), customerInfo.getState()));
 		Map<Integer, String> customerStateMap = result.collectAsMap();
-		// TODO Ask JD if collectAsMap is right approach as per their needs
-		/* 3. We encourage you to consider all possible cases of datasets like
-			number of states are small(finitely known set) OR huge(unknown set)
-			and come with appropriate solutions.
-		*/
 
 		JavaPairRDD<String, Long> salesReportEntries = salesInfoDataset.flatMapToPair(salesInfo -> getListOfTuples(salesInfo, customerStateMap).listIterator()).reduceByKey((x, y) -> x + y).sortByKey();
-		// TODO Ask JD why union is not working here
-		//getHeader(sparkContext).union(pairs).map(stringLongTuple2 -> stringLongTuple2._1() + stringLongTuple2._2()).saveAsTextFile(outputSalesReportPath);
-		salesReportEntries.map(stringLongTuple2 -> stringLongTuple2._1() + stringLongTuple2._2()).saveAsTextFile(outputSalesReportPath);
+		getHeader(sc).union(salesReportEntries).collect().forEach(stringLongTuple2 ->  System.out.println(stringLongTuple2._1() + stringLongTuple2._2()));
 	}
 
 	private JavaRDD<CustomerInfo> getCustomerInfoDS(JavaSparkContext sparkContext) {
 		CustomerInfoIterator customerInfoIterator = new CustomerInfoIterator();
-		JavaRDD<String> javaRDD = sparkContext.textFile(inputCustomerDataFilePath);
-		return javaRDD.flatMap(s -> customerInfoIterator.addCustomerInfo(s));
+		JavaRDD<String> javaRDD = sparkContext.textFile(inputCustomerDataFilePath, minPartitions);
+		return javaRDD.flatMap((FlatMapFunction<String, CustomerInfo>) customerInfoIterator::addCustomerInfo);
 	}
 
 	private JavaRDD<SalesInfo> getSalesInfoDS(JavaSparkContext sparkContext) {
 		SalesInfoIterator salesInfoIterator = new SalesInfoIterator();
-		JavaRDD<String> javaRDD = sparkContext.textFile(inputSalesDataFilePath);
-		return javaRDD.flatMap(s -> salesInfoIterator.addSalesInfo(s));
+		JavaRDD<String> javaRDD = sparkContext.textFile(inputSalesDataFilePath, minPartitions);
+		return javaRDD.flatMap((FlatMapFunction<String, SalesInfo>) salesInfoIterator::addSalesInfo);
 	}
 
-	private SparkContext getSparkSession() {
+
+	private SparkContext getSparkContext() {
 		SparkConf sparkConf = new SparkConf();
 		sparkConf.setAppName(REPORT_NAME);
-		sparkConf.setMaster("local");
+		sparkConf.setMaster("local[*]");
 		sparkConf.set("spark.driver.host", sparkDriverHost);
 		return new SparkContext(sparkConf);
 	}
 
 	private List<Tuple2<String, Long>> getListOfTuples(SalesInfo salesInfo, Map<Integer, String> customerStateMap) {
 		List<Tuple2<String, Long>> tuple2s = new ArrayList<>();
-		for (int level = 4; level >= 0 ; level--) {
+		for (int level = 4; level >= 0; level--) {
 			tuple2s.add(new Tuple2<>(getFilledKey(salesInfo, level, customerStateMap), salesInfo.getSalesPrice()));
 		}
 		return tuple2s;
@@ -92,11 +90,12 @@ public class SalesReport implements Serializable {
 		inputSalesDataFilePath = args[2];
 		outputSalesReportPath = args[3];
 		delimiter = args[4];
+		minPartitions = Integer.parseInt(args[5]);
 	}
 
 	private JavaPairRDD<String, Long> getHeader(JavaSparkContext sparkContext) {
 		String filledHeader = String.format(getKeyTemplate(Arrays.asList(HEADERS)), HEADERS);
-		List<Tuple2<String, Long>> headerTuple = Arrays.asList(new Tuple2<>(filledHeader, 0l));
+		List<Tuple2<String,String>> headerTuple = Arrays.asList(new Tuple2<>(filledHeader, ""));
 		JavaRDD rdd = sparkContext.parallelize(headerTuple, 1);
 		return JavaPairRDD.fromJavaRDD(rdd);
 	}

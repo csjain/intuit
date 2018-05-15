@@ -1,11 +1,14 @@
 package report.entity;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedList;
+import java.util.List;
+import java.util.Queue;
 
 public class CustomerInfoIterator implements Iterator, Serializable {
-	private LinkedList<String> customerInfos;
+	private Queue<String> customerInfos;
 	private static final long serialVersionUID = -5468544421231396366L;
 
 	public CustomerInfoIterator() {
@@ -14,7 +17,7 @@ public class CustomerInfoIterator implements Iterator, Serializable {
 
 	public CustomerInfoIterator addCustomerInfo(String input) {
 		if(CustomerInfo.isValid(input)) {
-			customerInfos.push(input);
+			customerInfos.add(input);
 		}
 		return this;
 	}
